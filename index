@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QazRent Sign — Облачная CRM и подписание договоров ЭЦП РК</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    @media print {
+      body * { visibility: hidden; }
+      #printable-contract, #printable-contract * { visibility: visible; }
+      #printable-contract { position: absolute; left: 0; top: 0; width: 100%; padding: 15px; background: white; }
+      .page-break { page-break-before: always; }
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans min-h-screen">
+
+  <!-- ВЕРХНЯЯ ПАНЕЛЬ -->
+  <header id="main-header" class="bg-white border-b border-slate-200 sticky top-0 z-30">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-2.5">
+        <div class="w-9 h-9 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-lg shadow-sm">Q</div>
+        <div>
+          <span class="font-bold text-slate-900 text-lg tracking-tight">QazRent Sign</span>
+          <span id="db-status-badge" class="ml-2 text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">Подключение...</span>
+        </div>
+      </div>
+
+      <div id="landlord-nav" class="flex items-center gap-2">
+        <button data-action="open-settings" class="px-3 py-1.5 text-sm rounded-lg border border-slate-300 hover:bg-slate-100 font-medium flex items-center gap-1.5">
+          ⚙️ Настройки БД
+        </button>
+        <button data-action="open-new-contract" class="px-4 py-1.5 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-sm">
+          + Новый договор + Акт
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ОСНОВНОЙ КОНТЕЙНЕР АРЕНДОДАТЕЛЯ -->
+  <main id="landlord-view" class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+    <!-- Уведомление об ошибке подключения (показывается только если таблицы не созданы) -->
+    <div id="db-error-banner" class="hidden bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-900">
+      <div class="font-bold">⚠️ База подключена, но таблицы ещё не созданы или заблокированы</div>
+      <p id="db-error-text" class="mt-1 text-xs text-red-700"></p>
+    </div>
+
+    <!-- Метрики -->
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+        <div class="text-xs font-semibold uppercase tracking-wider text-slate-400">Всего договоров</div>
+        <div id="stat-total" class="text-2xl font-bold text-slate-900 mt-1">0</div>
+      </div>
+      <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+        <div class="text-xs font-semibold uppercase tracking-wider text-amber-500">Ожидают подписи клиента</div>
+        <div id="stat-pending" class="text-2xl font-bold text-amber-600 mt-1">0</div>
+      </div>
+      <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+        <div class="text-xs font-semibold uppercase tracking-wider text-emerald-600">Подписано ЭЦП</div>
+        <div id="stat-signed" class="text-2xl font-bold text-emerald-600 mt-1">0</div>
+      </div>
+    </div>
+
+    <!-- Таблица договоров -->
+    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+        <h2 class="font-bold text-slate-800">Реестр договоров найма и актов приёма-передачи</h2>
+        <button data-action="refresh-data" class="text-sm text-blue-600 hover:underline font-medium">↻ Обновить список</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse">
+          <thead>
+            <tr class="bg-slate-50 text-slate-500 text-xs uppercase border-b border-slate-200">
+              <th class="py-3 px-4">№ Договора</th>
+              <th class="py-3 px-4">Объект аренды</th>
+              <th class="py-3 px-4">Квартиросъёмщик</th>
+              <th class="py-3 px-4">Сумма (₸)</th>
+              <th class="py-3 px-4">Статус ЭЦП</th>
+              <th class="py-3 px-4 text-right">Действия</th>
+            </tr>
+          </thead>
+          <tbody id="contracts-tbody" class="divide-y divide-slate-100 text-sm">
+            <tr><td colspan="6" class="py-8 text-center text-slate-400">Загрузка договоров из Supabase...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <!-- МОБИЛЬНЫЙ КАБИНЕТ КВАРТИРОСЪЁМЩИКА (?sign=ID) -->
+  <section id="tenant-mobile-view" class="hidden max-w-3xl mx-auto px-4 py-6 space-y-5">
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-7">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-4">
+        <div>
+          <span class="text-xs font-semibold uppercase tracking-wider text-blue-600">Электронный документооборот РК</span>
+          <h1 id="m-contract-title" class="text-xl font-bold text-slate-900 mt-0.5">Договор найма жилья + Акт</h1>
+        </div>
+        <span id="m-status-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">Ожидает подписи</span>
+      </div>
+
+      <!-- Печатная область: Договор + Приложение №1 (Акт приёма-передачи) -->
+      <div id="printable-contract" class="mt-4 text-sm text-slate-700 space-y-4 leading-relaxed bg-slate-50 p-4 sm:p-6 rounded-xl border border-slate-200">
+        <!-- Заполняется динамически -->
+      </div>
+
+      <!-- Блок подписания со смартфона -->
+      <div id="m-sign-controls" class="mt-6 space-y-3">
+        <div class="p-3.5 rounded-xl bg-blue-50 border border-blue-100 text-xs text-blue-900">
+          Нажимая кнопку подписания, вы подтверждаете согласие с условиями <strong>Договора найма</strong> и <strong>Акта приёма-передачи (показания счётчиков и опись имущества)</strong> с помощью вашей ЭЦП.
+        </div>
+
+        <button data-action="sign-egov-mobile" class="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-base shadow-md flex items-center justify-center gap-2 transition">
+          📱 Подписать через eGov Mobile (с телефона)
+        </button>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+          <button data-action="sign-ncalayer-tenant" class="py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700">
+            💻 Подписать через NCALayer (с ПК)
+          </button>
+          <button data-action="sign-demo-tenant" class="py-2.5 px-3 rounded-xl border border-dashed border-blue-300 bg-blue-50/50 hover:bg-blue-50 text-xs font-medium text-blue-700">
+            ⚡ Тест-подпись (Демо-режим)
+          </button>
+        </div>
+      </div>
+
+      <!-- Блок после успешного подписания -->
+      <div id="m-signed-box" class="hidden mt-6 space-y-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <button onclick="window.print()" class="py-3 px-4 rounded-xl bg-slate-900 text-white font-medium text-sm hover:bg-slate-800">
+            🖨️ Скачать / Печать PDF со штампом
+          </button>
+          <button data-action="download-cms" class="py-3 px-4 rounded-xl border border-slate-300 bg-white text-slate-800 font-medium text-sm hover:bg-slate-50">
+            📥 Скачать .CMS контейнер (ЭЦП)
+          </button>
+        </div>
+        <button data-action="back-to-landlord" class="w-full py-2 text-xs text-slate-400 hover:text-slate-600">
+          ← Вернуться в кабинет арендодателя
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- МОДАЛЬНОЕ ОКНО: НАСТРОЙКИ SUPABASE -->
+  <div id="modal-settings" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="font-bold text-lg text-slate-900">Настройки подключения Supabase</h3>
+        <button data-action="close-modals" class="text-slate-400 hover:text-slate-600 text-xl">&times;</button>
+      </div>
+      <p class="text-xs text-slate-500">Ключи уже вшиты в код по умолчанию. При необходимости здесь можно временно переопределить их для текущего браузера.</p>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-semibold text-slate-700 mb-1">Project URL</label>
+          <input id="inp-sb-url" type="url" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-700 mb-1">Publishable / Anon Key</label>
+          <input id="inp-sb-key" type="text" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm" />
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button data-action="reset-settings" class="px-3 py-2 text-xs text-slate-500 hover:text-slate-700 mr-auto">Сбросить к вшитым</button>
+        <button data-action="close-modals" class="px-4 py-2 text-sm rounded-lg border border-slate-300">Отмена</button>
+        <button data-action="save-settings" class="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: СОЗДАНИЕ ДОГОВОРА + АКТА ПРИЁМА-ПЕРЕДАЧИ -->
+  <div id="modal-new-contract" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+    <div class="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-xl space-y-4 my-8 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-100 pb-3 sticky top-0 bg-white z-10">
+        <h3 class="font-bold text-lg text-slate-900">Новый договор найма + Акт приёма-передачи</h3>
+        <button data-action="close-modals" class="text-slate-400 hover:text-slate-600 text-xl">&times;</button>
+      </div>
+
+      <form id="form-contract" class="space-y-4 text-sm">
+        <!-- Раздел 1: Основные данные -->
+        <div class="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-3">
+          <div class="text-xs font-bold uppercase tracking-wider text-blue-600">1. Условия договора аренды</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">Квартира / Объект</label>
+              <input name="property_title" required placeholder="2-комн. кв., ЖК Арман" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">Адрес объекта</label>
+              <input name="property_address" required placeholder="г. Костанай, ул. Абая 45, кв. 12" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">ФИО Арендодателя (ИП)</label>
+              <input name="landlord_name" required placeholder="ИП Саяпина М.В." class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">ИИН Арендодателя</label>
+              <input name="landlord_iin" required maxlength="12" pattern="\d{12}" placeholder="810415400123" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">ФИО Квартиросъёмщика</label>
+              <input name="tenant_name" required placeholder="Ахметов Серик Берикович" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">ИИН Квартиросъёмщика</label>
+              <input name="tenant_iin" required maxlength="12" pattern="\d{12}" placeholder="950820300456" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">Телефон (WhatsApp)</label>
+              <input name="tenant_phone" required placeholder="77011234567" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">Аренда в мес. (₸)</label>
+              <input name="rent_amount" type="number" required value="150000" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">Депозит (₸)</label>
+              <input name="deposit_amount" type="number" value="50000" class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">Дата заезда</label>
+              <input name="start_date" type="date" required class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-700 mb-1">Дата выезда</label>
+              <input name="end_date" type="date" required class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Раздел 2: Акт приёма-передачи (Счётчики и ключи) -->
+        <div class="bg-emerald-50/60 p-3.5 rounded-xl border border-emerald-200 space-y-3">
+          <div class="text-xs font-bold uppercase tracking-wider text-emerald-700">2. Акт приёма-передачи: Счётчики и ключи</div>
+          <div class="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+            <div>
+              <label class="block text-[11px] font-semibold text-slate-700 mb-1">Холодная вода (м³)</label>
+              <input name="meter_cold" type="text" placeholder="00124" class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs" />
+            </div>
+            <div>
+              <label class="block text-[11px] font-semibold text-slate-700 mb-1">Горячая вода (м³)</label>
+              <input name="meter_hot" type="text" placeholder="00089" class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs" />
+            </div>
+            <div>
+              <label class="block text-[11px] font-semibold text-slate-700 mb-1">Электроэнергия (кВт)</label>
+              <input name="meter_elec" type="text" placeholder="04512" class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs" />
+            </div>
+            <div>
+              <label class="block text-[11px] font-semibold text-slate-700 mb-1">Газ (м³)</label>
+              <input name="meter_gas" type="text" placeholder="—" class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs" />
+            </div>
+            <div>
+              <label class="block text-[11px] font-semibold text-slate-700 mb-1">Комплектов ключей</label>
+              <input name="keys_count" type="number" value="2" min="1" class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Раздел 3: Опись мебели и техники -->
+        <div class="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold uppercase tracking-wider text-slate-700">3. Опись передаваемого имущества</span>
+            <button type="button" data-action="add-inventory-row" class="text-xs px-2.5 py-1 rounded-md bg-blue-100 text-blue-700 font-semibold hover:bg-blue-200">
+              + Добавить предмет
+            </button>
+          </div>
+          <div id="inventory-rows" class="space-y-2">
+            <!-- Строки описи добавляются динамически -->
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-3 border-t border-slate-100 sticky bottom-0 bg-white">
+          <button type="button" data-action="close-modals" class="px-4 py-2 rounded-lg border border-slate-300">Отмена</button>
+          <button type="submit" class="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">Создать и получить ссылку</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО: ССЫЛКА И QR ДЛЯ ТЕЛЕФОНА КЛИЕНТА -->
+  <div id="modal-share" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl text-center space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="font-bold text-lg text-slate-900">Отправить на подпись клиенту</h3>
+        <button data-action="close-modals" class="text-slate-400 hover:text-slate-600 text-xl">&times;</button>
+      </div>
+      <p class="text-xs text-slate-500">Отсканируйте QR-код камерой смартфона или отправьте ссылку квартиросъёмщику в WhatsApp:</p>
+      <div id="share-qrcode" class="flex justify-center py-2"></div>
+      <input id="share-link-input" readonly class="w-full px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg text-xs text-slate-600 text-center" />
+      <div class="grid grid-cols-2 gap-2 pt-2">
+        <button data-action="copy-share-link" class="py-2.5 px-3 rounded-xl border border-slate-300 text-sm font-medium hover:bg-slate-50">
+          📋 Копировать ссылку
+        </button>
+        <a id="whatsapp-share-btn" href="#" target="_blank" class="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium flex items-center justify-center gap-1.5">
+          💬 В WhatsApp
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // =========================================================================
+    // ВШИТЫЕ РЕКВИЗИТЫ ВАШЕГО ПРОЕКТА SUPABASE (очищенный базовый URL проекта)
+    // =========================================================================
+    const DEFAULT_SUPABASE_URL = "https://ppfyggzunmsvxgylzaax.supabase.co";
+    const DEFAULT_SUPABASE_KEY = "sb_publishable_0Gef_Vz--vHVlYfJjZowvw_ik-YFLzz";
+
+    let supabaseClient = null;
+    let contractsCache = [];
+    let activeContract = null;
+
+    // Нормализация URL (убираем /rest/v1/ если пользователь вставил его в настройках)
+    function normalizeSupabaseUrl(rawUrl) {
+      if (!rawUrl) return "";
+      return rawUrl.trim().replace(/\/rest\/v1\/?$/, '').replace(/\/$/, '');
+    }
+
+    // Инициализация Supabase
+    function initSupabase() {
+      const url = normalizeSupabaseUrl(localStorage.getItem('qazrent_sb_url') || DEFAULT_SUPABASE_URL);
+      const key = (localStorage.getItem('qazrent_sb_key') || DEFAULT_SUPABASE_KEY).trim();
+      const badge = document.getElementById('db-status-badge');
+
+      if (url && key && window.supabase) {
+        try {
+          supabaseClient = window.supabase.createClient(url, key);
+          badge.textContent = "Supabase Online";
+          badge.className = "ml-2 text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-medium";
+          return true;
+        } catch (e) {
+          console.error("Ошибка инициализации Supabase:", e);
+        }
+      }
+      badge.textContent = "Локальный режим";
+      return false;
+    }
+
+    // Загрузка договоров из Supabase
+    async function loadContracts() {
+      const errBanner = document.getElementById('db-error-banner');
+      const errText = document.getElementById('db-error-text');
+
+      if (supabaseClient) {
+        const { data, error } = await supabaseClient
+          .from('contracts')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (!error && data) {
+          if (errBanner) errBanner.classList.add('hidden');
+          contractsCache = data;
+          renderContractsTable();
+          return;
+        } else if (error) {
+          console.warn("Supabase query error:", error);
+          if (errBanner && errText) {
+            errText.textContent = `Код ошибки: ${error.message}. Убедитесь, что вы выполнили SQL-скрипт создания таблицы contracts в SQL Editor.`;
+            errBanner.classList.remove('hidden');
+          }
+        }
+      }
+
+      const saved = localStorage.getItem('qazrent_local_contracts');
+      contractsCache = saved ? JSON.parse(saved) : [];
+      renderContractsTable();
+    }
+
+    // Отрисовка реестра договоров
+    function renderContractsTable() {
+      const tbody = document.getElementById('contracts-tbody');
+      document.getElementById('stat-total').textContent = contractsCache.length;
+      document.getElementById('stat-pending').textContent = contractsCache.filter(c => c.status !== 'signed').length;
+      document.getElementById('stat-signed').textContent = contractsCache.filter(c => c.status === 'signed').length;
+
+      if (contractsCache.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-slate-400">Договоров пока нет. Нажмите «+ Новый договор + Акт».</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = contractsCache.map(c => {
+        const isSigned = c.status === 'signed';
+        const statusHtml = isSigned
+          ? `<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">✔ Подписан ЭЦП</span>`
+          : `<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">⏳ Ждёт клиента</span>`;
+
+        return `
+          <tr class="hover:bg-slate-50 transition">
+            <td class="py-3.5 px-4 font-mono text-xs font-semibold text-blue-600">${c.id}</td>
+            <td class="py-3.5 px-4">
+              <div class="font-medium text-slate-900">${c.property_title}</div>
+              <div class="text-xs text-slate-400">${c.property_address}</div>
+            </td>
+            <td class="py-3.5 px-4">
+              <div class="font-medium text-slate-800">${c.tenant_name}</div>
+              <div class="text-xs text-slate-400">ИИН: ${c.tenant_iin}</div>
+            </td>
+            <td class="py-3.5 px-4 font-semibold text-slate-800">${Number(c.rent_amount).toLocaleString('ru-RU')} ₸</td>
+            <td class="py-3.5 px-4">${statusHtml}</td>
+            <td class="py-3.5 px-4 text-right space-x-1.5">
+              <button data-action="share-contract" data-id="${c.id}" class="px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-xs font-semibold">
+                📱 Ссылка / WhatsApp
+              </button>
+              <button data-action="open-client-view" data-id="${c.id}" class="px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-xs font-medium">
+                Открыть
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    // Добавление строки в опись имущества в форме
+    function addInventoryRow(name = '', qty = 1, condition = 'Исправно', value = '') {
+      const container = document.getElementById('inventory-rows');
+      const row = document.createElement('div');
+      row.className = 'grid grid-cols-12 gap-1.5 items-center inv-row';
+      row.innerHTML = `
+        <input type="text" placeholder="Наименование (напр. Холодильник)" value="${name}" class="col-span-5 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs inv-name" />
+        <input type="number" min="1" value="${qty}" title="Кол-во" class="col-span-2 px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-center inv-qty" />
+        <input type="text" placeholder="Состояние" value="${condition}" class="col-span-2 px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs inv-cond" />
+        <input type="number" placeholder="Цена ₸" value="${value}" class="col-span-2 px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs inv-val" />
+        <button type="button" data-action="remove-inv-row" class="col-span-1 text-slate-400 hover:text-red-600 text-center font-bold">&times;</button>
+      `;
+      container.appendChild(row);
+    }
+
+    // Инициализация базовой описи при открытии формы
+    function resetInventoryRows() {
+      const container = document.getElementById('inventory-rows');
+      container.innerHTML = '';
+      addInventoryRow('Холодильник двухкамерный', 1, 'Исправно', 180000);
+      addInventoryRow('Стиральная машина автомат', 1, 'Исправно', 140000);
+      addInventoryRow('Диван раскладной', 1, 'Хорошее', 120000);
+      addInventoryRow('Телевизор Smart TV', 1, 'Исправно', 110000);
+    }
+
+    // Открытие экрана договора + Акта приёма-передачи для клиента
+    async function openTenantView(contractId) {
+      let contract = contractsCache.find(c => c.id === contractId);
+
+      if (!contract && supabaseClient) {
+        const { data } = await supabaseClient.from('contracts').select('*').eq('id', contractId).single();
+        contract = data;
+      }
+
+      if (!contract) {
+        alert("Договор не найден в базе данных. Проверьте правильность ссылки.");
+        return;
+      }
+
+      activeContract = contract;
+      document.getElementById('landlord-view').classList.add('hidden');
+      document.getElementById('landlord-nav').classList.add('hidden');
+      document.getElementById('tenant-mobile-view').classList.remove('hidden');
+
+      document.getElementById('m-contract-title').textContent = `Договор найма № ${contract.id}`;
+      const isSigned = contract.status === 'signed';
+
+      const badge = document.getElementById('m-status-badge');
+      badge.textContent = isSigned ? '✔ Подписан ЭЦП РК' : 'Ожидает подписи';
+      badge.className = isSigned
+        ? 'px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800'
+        : 'px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800';
+
+      document.getElementById('m-sign-controls').classList.toggle('hidden', isSigned);
+      document.getElementById('m-signed-box').classList.toggle('hidden', !isSigned);
+
+      const meters = contract.meters || {};
+      const inventory = Array.isArray(contract.inventory) ? contract.inventory : [];
+
+      const inventoryTableRows = inventory.length > 0
+        ? inventory.map((item, idx) => `
+            <tr class="border-b border-slate-200">
+              <td class="py-1.5 px-2">${idx + 1}</td>
+              <td class="py-1.5 px-2 font-medium">${item.name}</td>
+              <td class="py-1.5 px-2 text-center">${item.qty} шт.</td>
+              <td class="py-1.5 px-2">${item.condition}</td>
+              <td class="py-1.5 px-2 text-right">${item.value ? Number(item.value).toLocaleString('ru-RU') + ' ₸' : '—'}</td>
+            </tr>
+          `).join('')
+        : `<tr><td colspan="5" class="py-2 px-2 text-center text-slate-400">Опись имущества не приложена</td></tr>`;
+
+      const stampBlock = isSigned ? `
+        <div class="mt-5 p-4 border-2 border-blue-600 rounded-xl bg-blue-50/80 text-xs text-blue-950 space-y-1">
+          <div class="font-bold uppercase tracking-wider text-blue-700">🇰🇿 Документ и Приложение №1 подписаны ЭЦП (НУЦ РК)</div>
+          <div><strong>Наймодатель:</strong> ${contract.landlord_name} (ИИН ${contract.landlord_iin})</div>
+          <div><strong>Наниматель:</strong> ${contract.tenant_name} (ИИН ${contract.tenant_iin})</div>
+          <div><strong>Дата и время подписания:</strong> ${new Date(contract.signed_at || Date.now()).toLocaleString('ru-RU')}</div>
+          <div class="font-mono text-[10px] break-all text-slate-500 pt-1">CMS SHA-256: ${(contract.cms_signature || '').slice(0, 72)}...</div>
+        </div>
+      ` : '';
+
+      document.getElementById('printable-contract').innerHTML = `
+        <div class="space-y-3">
+          <p class="font-bold text-center text-slate-900 text-base">ДОГОВОР НАЙМА ЖИЛОГО ПОМЕЩЕНИЯ № ${contract.id}</p>
+          <p><strong>Наймодатель:</strong> ${contract.landlord_name} (ИИН ${contract.landlord_iin}), с одной стороны, и <strong>Наниматель:</strong> ${contract.tenant_name} (ИИН ${contract.tenant_iin}), с другой стороны, заключили настоящий договор о нижеследующем:</p>
+          <p><strong>1. Предмет договора:</strong> Наймодатель предоставляет Нанимателю во временное возмездное владение и пользование жилое помещение: <strong>${contract.property_title}</strong>, расположенное по адресу: <strong>${contract.property_address}</strong>.</p>
+          <p><strong>2. Срок найма:</strong> с <strong>${contract.start_date}</strong> по <strong>${contract.end_date}</strong>.</p>
+          <p><strong>3. Плата и депозит:</strong> Ежемесячная плата составляет <strong>${Number(contract.rent_amount).toLocaleString('ru-RU')} тенге</strong>. Страховой депозит за сохранность имущества: <strong>${Number(contract.deposit_amount).toLocaleString('ru-RU')} тенге</strong>.</p>
+          <p><strong>4. Юридическая сила ЭЦП:</strong> Стороны признают юридическую силу настоящего электронного документа и Приложения №1 (Акта приёма-передачи), подписанных ЭЦП в соответствии со ст. 7 Закона РК «Об электронном документе и электронной цифровой подписи».</p>
+        </div>
+
+        <hr class="my-5 border-slate-300" />
+
+        <div class="space-y-3">
+          <p class="font-bold text-center text-slate-900 text-sm uppercase">Приложение №1 к Договору № ${contract.id}<br/>АКТ ПРИЁМА-ПЕРЕДАЧИ КВАРТИРЫ И ИМУЩЕСТВА</p>
+          <p class="text-xs">Наймодатель передал, а Наниматель принял жилое помещение по адресу: <strong>${contract.property_address}</strong>, комплекты ключей в количестве <strong>${contract.keys_count || 2} шт.</strong>, а также следующее имущество и показания приборов учёта на момент заселения:</p>
+
+          <!-- Таблица счётчиков -->
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border border-slate-300 bg-white">
+              <thead>
+                <tr class="bg-slate-100 border-b border-slate-300 text-slate-700">
+                  <th class="py-1.5 px-2.5 text-left">Холодная вода</th>
+                  <th class="py-1.5 px-2.5 text-left">Горячая вода</th>
+                  <th class="py-1.5 px-2.5 text-left">Электроэнергия</th>
+                  <th class="py-1.5 px-2.5 text-left">Газ</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="py-1.5 px-2.5 font-mono">${meters.cold || '—'} м³</td>
+                  <td class="py-1.5 px-2.5 font-mono">${meters.hot || '—'} м³</td>
+                  <td class="py-1.5 px-2.5 font-mono">${meters.elec || '—'} кВт·ч</td>
+                  <td class="py-1.5 px-2.5 font-mono">${meters.gas || '—'} м³</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Таблица описи имущества -->
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs border border-slate-300 bg-white">
+              <thead>
+                <tr class="bg-slate-100 border-b border-slate-300 text-slate-700">
+                  <th class="py-1.5 px-2 text-left w-8">№</th>
+                  <th class="py-1.5 px-2 text-left">Наименование имущества</th>
+                  <th class="py-1.5 px-2 text-center">Кол-во</th>
+                  <th class="py-1.5 px-2 text-left">Состояние</th>
+                  <th class="py-1.5 px-2 text-right">Оценка ущерба</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${inventoryTableRows}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        ${stampBlock}
+      `;
+    }
+
+    // Сохранение подписи в Supabase
+    async function completeSigning(cmsData) {
+      if (!activeContract) return;
+      const nowIso = new Date().toISOString();
+
+      activeContract.status = 'signed';
+      activeContract.tenant_signed = true;
+      activeContract.cms_signature = cmsData;
+      activeContract.signed_at = nowIso;
+
+      if (supabaseClient) {
+        const { error } = await supabaseClient
+          .from('contracts')
+          .update({
+            status: 'signed',
+            tenant_signed: true,
+            cms_signature: cmsData,
+            signed_at: nowIso
+          })
+          .eq('id', activeContract.id);
+
+        if (error) {
+          alert("Ошибка сохранения подписи в Supabase: " + error.message);
+          return;
+        }
+      } else {
+        const idx = contractsCache.findIndex(c => c.id === activeContract.id);
+        if (idx !== -1) contractsCache[idx] = activeContract;
+        localStorage.setItem('qazrent_local_contracts', JSON.stringify(contractsCache));
+      }
+
+      openTenantView(activeContract.id);
+    }
+
+    // Подписание через NCALayer (WebSocket)
+    function signWithNCALayer() {
+      const ws = new WebSocket('wss://127.0.0.1:13579/');
+      ws.onopen = () => {
+        const docText = JSON.stringify(activeContract);
+        const docBase64 = btoa(unescape(encodeURIComponent(docText)));
+        ws.send(JSON.stringify({
+          module: "kz.gov.pki.knca.commonUtils",
+          method: "createCAdESFromBase64",
+          args: ["PKCS12", "SIGNATURE", docBase64, true]
+        }));
+      };
+      ws.onmessage = (e) => {
+        const res = JSON.parse(e.data);
+        if (res.code === "200" && res.responseObject) {
+          completeSigning(res.responseObject);
+        } else if (res.message) {
+          alert("NCALayer: " + res.message);
+        }
+      };
+      ws.onerror = () => {
+        alert("NCALayer не запущен на этом устройстве. На телефоне используйте кнопку «Подписать через eGov Mobile».");
+      };
+    }
+
+    // Единый обработчик кликов
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const action = btn.dataset.action;
+
+      if (action === 'open-settings') {
+        document.getElementById('inp-sb-url').value = localStorage.getItem('qazrent_sb_url') || DEFAULT_SUPABASE_URL;
+        document.getElementById('inp-sb-key').value = localStorage.getItem('qazrent_sb_key') || DEFAULT_SUPABASE_KEY;
+        document.getElementById('modal-settings').classList.remove('hidden');
+      }
+
+      if (action === 'save-settings') {
+        localStorage.setItem('qazrent_sb_url', normalizeSupabaseUrl(document.getElementById('inp-sb-url').value));
+        localStorage.setItem('qazrent_sb_key', document.getElementById('inp-sb-key').value.trim());
+        initSupabase();
+        await loadContracts();
+        document.getElementById('modal-settings').classList.add('hidden');
+      }
+
+      if (action === 'reset-settings') {
+        localStorage.removeItem('qazrent_sb_url');
+        localStorage.removeItem('qazrent_sb_key');
+        initSupabase();
+        await loadContracts();
+        document.getElementById('modal-settings').classList.add('hidden');
+      }
+
+      if (action === 'open-new-contract') {
+        resetInventoryRows();
+        document.getElementById('modal-new-contract').classList.remove('hidden');
+      }
+
+      if (action === 'add-inventory-row') {
+        addInventoryRow();
+      }
+
+      if (action === 'remove-inv-row') {
+        btn.closest('.inv-row')?.remove();
+      }
+
+      if (action === 'close-modals') {
+        document.querySelectorAll('[id^="modal-"]').forEach(m => m.classList.add('hidden'));
+      }
+
+      if (action === 'refresh-data') {
+        await loadContracts();
+      }
+
+      if (action === 'share-contract') {
+        const id = btn.dataset.id;
+        const contract = contractsCache.find(c => c.id === id);
+        const baseUrl = window.location.href.split('?')[0];
+        const signUrl = `${baseUrl}?sign=${encodeURIComponent(id)}`;
+
+        document.getElementById('share-link-input').value = signUrl;
+        const qrContainer = document.getElementById('share-qrcode');
+        qrContainer.innerHTML = '';
+        new QRCode(qrContainer, { text: signUrl, width: 160, height: 160 });
+
+        const cleanPhone = (contract?.tenant_phone || '').replace(/\D/g, '');
+        const waText = encodeURIComponent(`Здравствуйте, ${contract?.tenant_name || ''}! Прошу ознакомиться и подписать с помощью ЭЦП договор аренды и акт приёма-передачи № ${id} по ссылке: ${signUrl}`);
+        document.getElementById('whatsapp-share-btn').href = `https://wa.me/${cleanPhone}?text=${waText}`;
+
+        document.getElementById('modal-share').classList.remove('hidden');
+      }
+
+      if (action === 'copy-share-link') {
+        const inp = document.getElementById('share-link-input');
+        inp.select();
+        navigator.clipboard.writeText(inp.value);
+        btn.textContent = "✔ Скопировано!";
+        setTimeout(() => btn.textContent = "📋 Копировать ссылку", 2000);
+      }
+
+      if (action === 'open-client-view') {
+        openTenantView(btn.dataset.id);
+      }
+
+      if (action === 'back-to-landlord') {
+        window.history.replaceState({}, '', window.location.pathname);
+        document.getElementById('tenant-mobile-view').classList.add('hidden');
+        document.getElementById('landlord-view').classList.remove('hidden');
+        document.getElementById('landlord-nav').classList.remove('hidden');
+        loadContracts();
+      }
+
+      if (action === 'sign-egov-mobile') {
+        const signUrl = encodeURIComponent(window.location.href);
+        window.location.href = `mobileSign:?link=${signUrl}`;
+        setTimeout(() => {
+          if (confirm("Если приложение eGov Mobile не открылось автоматически (требуется регистрация шлюза в АО НИТ), выполнить тестовое подтверждение подписи сейчас?")) {
+            completeSigning("EGOV_MOBILE_CMS_" + btoa(activeContract.id + "_" + Date.now()));
+          }
+        }, 1800);
+      }
+
+      if (action === 'sign-ncalayer-tenant') {
+        signWithNCALayer();
+      }
+
+      if (action === 'sign-demo-tenant') {
+        completeSigning("DEMO_CMS_RK_" + btoa(activeContract.id + "_" + Date.now()));
+      }
+
+      if (action === 'download-cms' && activeContract) {
+        const blob = new Blob([activeContract.cms_signature || ''], { type: 'application/pkcs7-mime' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${activeContract.id}_signed.cms`;
+        a.click();
+      }
+    });
+
+    // Сохранение нового договора и акта приёма-передачи
+    document.getElementById('form-contract').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const newId = `DOG-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`;
+
+      // Собираем опись имущества
+      const inventory = [];
+      document.querySelectorAll('#inventory-rows .inv-row').forEach(row => {
+        const name = row.querySelector('.inv-name')?.value.trim();
+        if (name) {
+          inventory.push({
+            name,
+            qty: Number(row.querySelector('.inv-qty')?.value || 1),
+            condition: row.querySelector('.inv-cond')?.value.trim() || 'Исправно',
+            value: Number(row.querySelector('.inv-val')?.value || 0)
+          });
+        }
+      });
+
+      const record = {
+        id: newId,
+        property_title: fd.get('property_title'),
+        property_address: fd.get('property_address'),
+        landlord_name: fd.get('landlord_name'),
+        landlord_iin: fd.get('landlord_iin'),
+        tenant_name: fd.get('tenant_name'),
+        tenant_iin: fd.get('tenant_iin'),
+        tenant_phone: fd.get('tenant_phone'),
+        rent_amount: Number(fd.get('rent_amount')),
+        deposit_amount: Number(fd.get('deposit_amount') || 0),
+        start_date: fd.get('start_date'),
+        end_date: fd.get('end_date'),
+        keys_count: Number(fd.get('keys_count') || 2),
+        meters: {
+          cold: fd.get('meter_cold') || '—',
+          hot: fd.get('meter_hot') || '—',
+          elec: fd.get('meter_elec') || '—',
+          gas: fd.get('meter_gas') || '—'
+        },
+        inventory,
+        status: 'pending',
+        landlord_signed: true,
+        tenant_signed: false
+      };
+
+      if (supabaseClient) {
+        const { error } = await supabaseClient.from('contracts').insert([record]);
+        if (error) {
+          alert("Ошибка сохранения в Supabase: " + error.message + "\n\nПроверьте, выполнены ли SQL-запросы создания таблицы contracts.");
+          return;
+        }
+      } else {
+        contractsCache.unshift(record);
+        localStorage.setItem('qazrent_local_contracts', JSON.stringify(contractsCache));
+      }
+
+      e.target.reset();
+      document.getElementById('modal-new-contract').classList.add('hidden');
+      await loadContracts();
+    });
+
+    // Запуск при загрузке
+    window.addEventListener('DOMContentLoaded', async () => {
+      initSupabase();
+      const params = new URLSearchParams(window.location.search);
+      const signId = params.get('sign');
+
+      if (signId) {
+        await openTenantView(signId);
+      } else {
+        await loadContracts();
+      }
+    });
+  </script>
+</body>
+</html>
